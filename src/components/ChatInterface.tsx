@@ -1,365 +1,261 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
-  Layout, 
-  Input, 
-  Button, 
   Card, 
   Space, 
   Typography, 
-  message,
+  message as antMessage,
   Row,
   Col,
   Tooltip,
   Tag,
-  Avatar,
+  Button,
   Divider
 } from 'antd';
 import { 
-  SendOutlined, 
   ClearOutlined, 
-  UserOutlined, 
-  RobotOutlined,
   IdcardOutlined,
-  MessageOutlined
+  MessageOutlined,
+  RobotOutlined
 } from '@ant-design/icons';
+import { 
+  Bubble, 
+  Sender, 
+  useXChat, 
+  useXAgent 
+} from '@ant-design/x';
+import type { ChatRequest, ChatResponse } from '@/types/api';
+import type { Message } from '@/types';
 
-const { Content } = Layout;
-const { TextArea } = Input;
-const { Text, Paragraph, Title } = Typography;
-
-interface Message {
-  id: string;
-  content: string;
-  role: 'user' | 'assistant';
-  timestamp: string;
-}
+const { Paragraph, Title } = Typography;
 
 const ChatInterface: React.FC = () => {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [sessionId] = useState(() => `session_${Date.now()}`);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [mounted, setMounted] = useState(false);
 
-  const sendMessage = async () => {
-    if (!input.trim() || isLoading) return;
+  useEffect(() => {
+    setSessionId(`session_${Date.now()}`);
+    setMounted(true);
+  }, []);
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      content: input,
-      role: "user",
-      timestamp: new Date().toISOString(),
-    };
+  // 使用 useXAgent 管理 AI 代理
+  const [agent] = useXAgent({
+    request: async (info, callbacks) => {
+      const { message: userMessage } = info;
+      const { onUpdate, onSuccess, onError } = callbacks;
 
-    setMessages((prev) => [...prev, userMessage]);
-    const currentInput = input;
-    setInput("");
-    setIsLoading(true);
+      try {
+        // 构建请求数据
+        const requestData: ChatRequest = {
+          message: userMessage,
+          streaming: true,
+          sessionId: sessionId
+        };
 
-    try {
-      // 模拟 API 调用
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content: `您好！您刚才说："${currentInput}"。\n\n这是一个使用 Ant Design 重构的智能聊天界面演示。界面采用了现代化的设计风格，支持：\n\n• 实时消息交互\n• 优雅的用户界面\n• 响应式布局设计\n• 流畅的动画效果\n\n感谢您的使用！`,
-        role: "assistant",
-        timestamp: new Date().toISOString(),
-      };
+        // 发送请求到 /api/chat
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestData),
+        });
 
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch (error) {
-      message.error('发送消息失败，请检查网络连接');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+        if (!response.ok) {
+          const errorData: ChatResponse = await response.json();
+          throw new Error(errorData.error || '请求失败');
+        }
+
+        // 检查是否是流式响应
+        const contentType = response.headers.get('content-type');
+        if (contentType?.includes('text/plain')) {
+          // 处理流式响应
+          const reader = response.body?.getReader();
+          const decoder = new TextDecoder();
+          let currentContent = '';
+
+          if (reader) {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              const chunk = decoder.decode(value, { stream: true });
+              currentContent += chunk;
+              onUpdate(currentContent);
+            }
+          }
+
+          onSuccess(currentContent);
+        } else {
+          // 处理标准 JSON 响应
+          const data: ChatResponse = await response.json();
+          if (data.error) {
+            throw new Error(data.error);
+          }
+          onSuccess(data.answer);
+        }
+      } catch (error) {
+        console.error('Chat API 请求失败:', error);
+        onError(error as Error);
+        antMessage.error('发送消息失败，请检查网络连接');
+      }
+    },
+  });
+
+  // 使用 useXChat 管理聊天数据流
+  const { messages, onRequest } = useXChat({
+    agent,
+  });
 
   const clearChat = () => {
-    setMessages([]);
-    message.success('会话已清除');
+    // 清空消息（需要重新初始化 useXChat）
+    window.location.reload(); // 临时解决方案
+    antMessage.success('会话已清除');
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
+  if (!mounted) {
+    return null; // 避免 hydration 不匹配
+  }
+
+  // 转换消息格式为 Bubble.List 需要的格式
+  const bubbleItems = messages.map((msg) => {
+    // 确定消息角色
+    const role = msg.role || (msg.message ? 'user' : 'assistant');
+    
+    return {
+      key: msg.id,
+      content: msg.message || msg.content || '',
+      role: role,
+      avatar: role === 'user' ? 
+        { style: { backgroundColor: '#52c41a' } } : 
+        { icon: <RobotOutlined />, style: { backgroundColor: '#1890ff' } },
+      styles: {
+        content: {
+          background: role === 'user' 
+            ? 'linear-gradient(135deg, #1890ff 0%, #40a9ff 100%)' 
+            : 'linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%)',
+          color: role === 'user' ? '#ffffff' : '#333333',
+          borderRadius: '12px',
+          boxShadow: role === 'user' 
+            ? '0 4px 12px rgba(24, 144, 255, 0.3)' 
+            : '0 2px 8px rgba(0, 0, 0, 0.1)',
+          border: role === 'assistant' ? '1px solid #e8e8e8' : 'none',
+        }
+      }
+    };
+  });
 
   return (
-    <Layout style={{ height: '100%', background: 'transparent' }}>
-      <Content style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {/* 控制面板 */}
-        <Card 
-          size="small" 
-          style={{ 
-            marginBottom: '16px',
-            background: 'linear-gradient(45deg, #f0f2f5, #fafafa)',
-            border: '1px solid #e8e8e8',
-            borderRadius: '8px'
-          }}
-        >
-          <Row gutter={16} align="middle">
-            <Col flex="auto">
-              <Space size="middle">
-                <Tooltip title="会话标识符">
-                  <Tag icon={<IdcardOutlined />} color="blue">
-                    {sessionId.slice(-8)}
-                  </Tag>
-                </Tooltip>
-                <Tag icon={<MessageOutlined />} color="green">
-                  {messages.length} 条消息
+    <div style={{ 
+      height: '100%', 
+      display: 'flex', 
+      flexDirection: 'column',
+      minHeight: 0
+    }}>
+      {/* 控制面板 */}
+      <Card 
+        size="small" 
+        style={{ 
+          marginBottom: '16px',
+          background: 'linear-gradient(45deg, #f0f2f5, #fafafa)',
+          border: '1px solid #e8e8e8',
+          borderRadius: '8px',
+          flexShrink: 0
+        }}
+      >
+        <Row gutter={16} align="middle">
+          <Col flex="auto">
+            <Space size="middle">
+              <Tooltip title="会话标识符">
+                <Tag icon={<IdcardOutlined />} color="blue">
+                  {sessionId.slice(-8)}
                 </Tag>
-              </Space>
-            </Col>
-            
-            <Col>
-              <Button 
-                type="default" 
-                size="small"
-                icon={<ClearOutlined />}
-                onClick={clearChat}
-                disabled={isLoading || messages.length === 0}
-                style={{ borderRadius: '6px' }}
-              >
-                清除对话
-              </Button>
-            </Col>
-          </Row>
-        </Card>
+              </Tooltip>
+              <Tag icon={<MessageOutlined />} color="green">
+                {messages.length} 条消息
+              </Tag>
+            </Space>
+          </Col>
+          
+          <Col>
+            <Button 
+              type="default" 
+              size="small"
+              icon={<ClearOutlined />}
+              onClick={clearChat}
+              disabled={messages.length === 0}
+              style={{ borderRadius: '6px' }}
+            >
+              清除对话
+            </Button>
+          </Col>
+        </Row>
+      </Card>
 
-        {/* 消息列表 */}
-        <div 
-          style={{ 
-            flex: 1, 
-            overflowY: 'auto', 
-            padding: '0 8px',
-            marginBottom: '16px',
-            scrollBehavior: 'smooth'
-          }}
-        >
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            {messages.length === 0 ? (
-              <Card 
-                style={{ 
-                  textAlign: 'center',
-                  background: 'linear-gradient(135deg, #f6f9fc 0%, #e9f4ff 100%)',
-                  border: '2px dashed #91d5ff',
-                  borderRadius: '12px',
-                  padding: '40px 20px'
-                }}
-              >
-                <RobotOutlined style={{ fontSize: '48px', color: '#1890ff', marginBottom: '16px' }} />
-                <Title level={4} style={{ color: '#1890ff', marginBottom: '8px' }}>
-                  欢迎使用智能知识问答系统
-                </Title>
-                <Paragraph style={{ margin: 0, color: '#666', fontSize: '14px' }}>
-                  请在下方输入您的问题，我将为您提供详细的回答
-                </Paragraph>
-              </Card>
-            ) : (
-              messages.map((msg) => (
-                <div key={msg.id} style={{ width: '100%' }}>
-                  <Card
-                    size="small"
-                    style={{
-                      marginLeft: msg.role === "user" ? '15%' : '0',
-                      marginRight: msg.role === "user" ? '0' : '15%',
-                      background: msg.role === "user" 
-                        ? 'linear-gradient(135deg, #1890ff 0%, #40a9ff 100%)' 
-                        : 'linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%)',
-                      border: msg.role === "user" ? 'none' : '1px solid #e8e8e8',
-                      borderRadius: '12px',
-                      boxShadow: msg.role === "user" 
-                        ? '0 4px 12px rgba(24, 144, 255, 0.3)' 
-                        : '0 2px 8px rgba(0, 0, 0, 0.1)',
-                      color: msg.role === "user" ? 'white' : 'inherit'
-                    }}
-                  >
-                    <Row gutter={12} align="top">
-                      <Col flex="none">
-                        <Avatar 
-                          size={32}
-                          style={{ 
-                            background: msg.role === "user" ? 'rgba(255,255,255,0.2)' : '#f0f2f5',
-                            border: msg.role === "user" ? '2px solid rgba(255,255,255,0.3)' : '2px solid #e8e8e8'
-                          }}
-                          icon={msg.role === "user" ? 
-                            <UserOutlined style={{ color: msg.role === "user" ? 'white' : '#1890ff' }} /> : 
-                            <RobotOutlined style={{ color: '#1890ff' }} />
-                          }
-                        />
-                      </Col>
-                      
-                      <Col flex="auto">
-                        <div style={{ marginBottom: '8px' }}>
-                          <Text strong style={{ 
-                            color: msg.role === "user" ? 'white' : '#1890ff',
-                            fontSize: '13px'
-                          }}>
-                            {msg.role === "user" ? '您' : 'AI 助手'}
-                          </Text>
-                          <Text style={{ 
-                            fontSize: '11px', 
-                            opacity: 0.7,
-                            color: msg.role === "user" ? 'white' : '#999',
-                            marginLeft: '8px'
-                          }}>
-                            {new Date(msg.timestamp).toLocaleTimeString()}
-                          </Text>
-                        </div>
-                        
-                        <Paragraph 
-                          style={{ 
-                            margin: 0, 
-                            whiteSpace: 'pre-wrap',
-                            color: msg.role === "user" ? 'white' : 'inherit',
-                            lineHeight: '1.6'
-                          }}
-                        >
-                          {msg.content}
-                        </Paragraph>
-                      </Col>
-                    </Row>
-                  </Card>
-                </div>
-              ))
-            )}
-            
-            {isLoading && (
-              <div style={{ width: '100%' }}>
-                <Card
-                  size="small"
-                  style={{
-                    marginRight: '15%',
-                    background: 'linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%)',
-                    border: '1px solid #e8e8e8',
-                    borderRadius: '12px',
-                    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)'
-                  }}
-                >
-                  <Row gutter={12} align="top">
-                    <Col flex="none">
-                      <Avatar 
-                        size={32}
-                        style={{ 
-                          background: '#f0f2f5',
-                          border: '2px solid #e8e8e8'
-                        }}
-                        icon={<RobotOutlined style={{ color: '#1890ff' }} />}
-                      />
-                    </Col>
-                    
-                    <Col flex="auto">
-                      <div style={{ marginBottom: '8px' }}>
-                        <Text strong style={{ color: '#1890ff', fontSize: '13px' }}>
-                          AI 助手
-                        </Text>
-                      </div>
-                      
-                      <div style={{ display: 'flex', alignItems: 'center' }}>
-                        <div style={{ 
-                          display: 'flex', 
-                          gap: '4px',
-                          alignItems: 'center'
-                        }}>
-                          <div style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            background: '#1890ff',
-                            animation: 'pulse 1.5s ease-in-out infinite'
-                          }} />
-                          <div style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            background: '#1890ff',
-                            animation: 'pulse 1.5s ease-in-out infinite 0.2s'
-                          }} />
-                          <div style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            background: '#1890ff',
-                            animation: 'pulse 1.5s ease-in-out infinite 0.4s'
-                          }} />
-                          <Text style={{ marginLeft: '8px', color: '#666' }}>
-                            正在思考...
-                          </Text>
-                        </div>
-                      </div>
-                    </Col>
-                  </Row>
-                </Card>
-              </div>
-            )}
-          </Space>
-        </div>
+      {/* 消息列表区域 - 使用 Bubble.List */}
+      <div 
+        style={{ 
+          flex: 1, 
+          overflowY: 'auto', 
+          padding: '0 8px',
+          marginBottom: '16px',
+          scrollBehavior: 'smooth',
+          minHeight: 0
+        }}
+      >
+        {messages.length === 0 ? (
+          <Card 
+            style={{ 
+              textAlign: 'center',
+              background: 'linear-gradient(135deg, #f6f9fc 0%, #e9f4ff 100%)',
+              border: '2px dashed #91d5ff',
+              borderRadius: '12px',
+              padding: '40px 20px'
+            }}
+          >
+            <RobotOutlined style={{ fontSize: '48px', color: '#1890ff', marginBottom: '16px' }} />
+            <Title level={4} style={{ color: '#1890ff', marginBottom: '8px' }}>
+              欢迎使用智能知识问答系统
+            </Title>
+            <Paragraph style={{ margin: 0, color: '#666', fontSize: '14px' }}>
+              请在下方输入您的问题，我将为您提供详细的回答
+            </Paragraph>
+          </Card>
+        ) : (
+          <Bubble.List 
+            items={bubbleItems}
+            style={{ width: '100%' }}
+          />
+        )}
+      </div>
 
-        <Divider style={{ margin: '8px 0' }} />
+      <Divider style={{ margin: '8px 0' }} />
 
-        {/* 输入区域 */}
-        <Card 
-          size="small"
-          style={{ 
+      {/* 输入区域 - 使用 Sender */}
+      <div style={{ flexShrink: 0 }}>
+        <Sender
+          onSubmit={onRequest}
+          placeholder="请输入您的问题..."
+          loading={agent.isRequesting()}
+          style={{
             background: 'linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%)',
             border: '1px solid #e8e8e8',
             borderRadius: '12px',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)'
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
           }}
-        >
-          <Space.Compact style={{ width: '100%' }}>
-            <TextArea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="请输入您的问题... (Shift+Enter 换行，Enter 发送)"
-              autoSize={{ minRows: 1, maxRows: 4 }}
-              disabled={isLoading}
-              style={{ 
-                resize: 'none',
-                borderRadius: '8px 0 0 8px',
-                border: '1px solid #d9d9d9',
-                fontSize: '14px'
-              }}
-            />
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              onClick={sendMessage}
-              disabled={!input.trim() || isLoading}
-              loading={isLoading}
-              style={{ 
-                height: 'auto',
-                borderRadius: '0 8px 8px 0',
-                background: 'linear-gradient(135deg, #1890ff 0%, #40a9ff 100%)',
-                border: 'none',
-                minWidth: '80px',
-                fontWeight: '500'
-              }}
-            >
-              发送
-            </Button>
-          </Space.Compact>
-        </Card>
-      </Content>
-      
-      <style jsx>{`
-        @keyframes pulse {
-          0%, 80%, 100% {
-            opacity: 0.3;
-            transform: scale(0.8);
-          }
-          40% {
-            opacity: 1;
-            transform: scale(1);
-          }
-        }
-      `}</style>
-    </Layout>
+        />
+        
+        <div style={{ 
+          marginTop: '8px', 
+          fontSize: '12px', 
+          color: '#999',
+          textAlign: 'center'
+        }}>
+          按 Enter 发送消息 • 支持多轮对话 • AI 智能回复
+        </div>
+      </div>
+    </div>
   );
 };
 
